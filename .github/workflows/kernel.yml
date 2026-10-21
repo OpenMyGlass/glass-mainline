@@ -1,0 +1,89 @@
+# Builds the mainline kernel (zImage) and the Glass DTBs, in the default and
+# the debug variant, from kernel.org sources checked by scripts/fetch-kernel.sh
+# (sha256 and the kernel.org autosigner's signature). Nothing here talks to a
+# device; the artifacts are for reading and for later phases.
+name: kernel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      KV: 7.2.9
+      DTBS_DEFAULT: ti/omap/omap4-glass-xec.dtb ti/omap/omap4-glass-xec-safe.dtb
+      DTBS_DEBUG: ti/omap/omap4-glass-xec-safe-debug.dtb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Host tools (Ubuntu's signed packages)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            clang lld llvm make bison flex bc gnupg bubblewrap cpio xz-utils device-tree-compiler
+          clang --version | head -n 1
+          # Ubuntu 24.04 confines unprivileged user namespaces with AppArmor;
+          # bubblewrap (the Python-free sandbox) needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Fetch and verify the kernel sources
+        run: scripts/fetch-kernel.sh
+
+      - name: Build the default variant
+        run: JOBS=$(nproc) scripts/build-kernel.sh zImage $DTBS_DEFAULT
+
+      - name: Build the debug variant
+        run: GLASS_VARIANT=debug JOBS=$(nproc) scripts/build-kernel.sh zImage $DTBS_DEBUG
+
+      - name: Check the variants
+        run: |
+          d=build/kernel-$KV
+          g=build/kernel-$KV-debug
+          # The default build carries none of the debug variant's options.
+          for o in CONFIG_USB_G_SERIAL=y CONFIG_U_SERIAL_CONSOLE=y CONFIG_CMDLINE_EXTEND=y; do
+            if grep -qx "$o" $d/.config; then echo "default build has $o"; exit 1; fi
+            grep -qx "$o" $g/.config || { echo "debug build lacks $o"; exit 1; }
+          done
+          # The debug DTB: one console zone over the 2 MB at 0xa0000000, ECC 16.
+          dtc -q -I dtb -O dts $g/arch/arm/boot/dts/ti/omap/omap4-glass-xec-safe-debug.dtb > debug.dts
+          awk '/ramoops@a0000000/,/};/' debug.dts | tee ramoops.txt
+          grep -q 'console-size = <0x200000>' ramoops.txt
+          grep -q 'ecc-size = <0x10>' ramoops.txt
+          grep -q 'record-size = <0x00>' ramoops.txt
+          # The safe and safe-debug DTBs differ only there.
+          dtc -q -I dtb -O dts $d/arch/arm/boot/dts/ti/omap/omap4-glass-xec-safe.dtb > safe.dts
+          diff safe.dts debug.dts | tee dt.diff || true
+          if grep '^[<>]' dt.diff | grep -v -e 'model = ' -e 'record-size' -e 'console-size' -e 'pmsg-size' -e 'ecc-size'; then
+            echo "safe-debug differs from safe outside ramoops and model"; exit 1
+          fi
+          ls -l $d/arch/arm/boot/zImage $g/arch/arm/boot/zImage
+
+      - name: Collect the artifacts
+        run: |
+          mkdir -p artifacts/default artifacts/debug
+          cp build/kernel-$KV/arch/arm/boot/zImage build/kernel-$KV/.config artifacts/default/
+          cp build/kernel-$KV/arch/arm/boot/dts/ti/omap/omap4-glass-xec*.dtb artifacts/default/
+          cp build/kernel-$KV-debug/arch/arm/boot/zImage build/kernel-$KV-debug/.config artifacts/debug/
+          cp build/kernel-$KV-debug/arch/arm/boot/dts/ti/omap/omap4-glass-xec-safe-debug.dtb artifacts/debug/
+          (cd artifacts && sha256sum */* | tee SHA256SUMS)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: glass-kernel-${{ env.KV }}
+          path: artifacts/
+          retention-days: 14
+          include-hidden-files: true
