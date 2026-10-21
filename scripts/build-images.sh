@@ -13,6 +13,8 @@
 #                        and glass info (XE24's own rooted image is gone).
 #   rootfs.img           the Alpine rootfs (ext4, sparse for fastboot) for
 #                        userdata.
+#   boot-safe-debug.img  only when the debug kernel variant was built: the
+#                        debug kernel + the safe-debug DTB (OpenMyGlass).
 # Every boot image must fit the boot and recovery partitions: 8 MiB each
 # on the user's unit (its partition table, read 2026-10-07: mmcblk0p7 and
 # p6, 16384 sectors; backup/*/partitions.txt). Before that the bound was the
@@ -20,8 +22,10 @@
 set -euo pipefail
 top=$(cd "$(dirname "$0")/.." && pwd)
 KV=${KV:-7.2.9}
-k=$top/build/kernel-$KV
-src=$top/src/linux-$KV
+# GLASS_WORK: where the kernel sources and builds are (scripts/build-kernel.sh).
+work=${GLASS_WORK:-$top}
+k=$work/build/kernel-$KV
+src=$work/src/linux-$KV
 out=$top/out
 bi=$top/tools/bootimg/bootimg
 mkdir -p "$out"
@@ -68,6 +72,23 @@ for v in safe full; do
     "$bi" pack "$out/boot-$v.img" "$out/zImage-dtb-$v" "$out/empty-ramdisk.gz" "${hdr[@]}" --cmdline "$mcmd" > /dev/null
     fit "$out/boot-$v.img"
 done
+
+# The debug variant (OpenMyGlass Phase 0), only when it was built
+# (GLASS_VARIANT=debug scripts/build-kernel.sh, with GLASS_INITRAMFS): the
+# debug kernel with the safe-debug DTB. Its own command line
+# (config/glass-debug.config) is appended to $mcmd by the kernel. Never
+# booted: how it would be used is an inactive draft in
+# docs/future-phases-draft.md.
+kd=$k-debug
+if [ -f "$kd/arch/arm/boot/zImage" ]; then
+    grep -q '^CONFIG_INITRAMFS_SOURCE="..*"' "$kd/.config" ||
+        { echo "build-images: the debug kernel has no built-in initramfs (GLASS_INITRAMFS)" >&2; exit 1; }
+    d=$kd/arch/arm/boot/dts/ti/omap/omap4-glass-xec-safe-debug.dtb
+    [ -f "$d" ] || { echo "build-images: no $d" >&2; exit 1; }
+    cat "$kd/arch/arm/boot/zImage" "$d" > "$out/zImage-dtb-safe-debug"
+    "$bi" pack "$out/boot-safe-debug.img" "$out/zImage-dtb-safe-debug" "$out/empty-ramdisk.gz" "${hdr[@]}" --cmdline "$mcmd" > /dev/null
+    fit "$out/boot-safe-debug.img"
+fi
 
 # The stock kernel with this userland: its ramdisk is gzip (all it reads),
 # owned by root through the kernel's own gen_init_cpio, without the

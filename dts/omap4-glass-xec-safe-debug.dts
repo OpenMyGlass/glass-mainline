@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * Google Glass XE-C, the safe image for the DEBUG kernel variant
+ * (config/glass-debug.config). Phase 0: built on the host, never booted.
+ *
+ * The same hardware description as omap4-glass-xec-safe.dts: no MMC
+ * controller, so it cannot touch the eMMC, and no regulator, voltage, clock
+ * or GPIO differs from it. Only the layout of the ramoops region changes.
+ *
+ * The region at 0xa0000000 (2 MB) is the one the stock 3.4 kernel uses for
+ * its Android RAM console (notle: omap_ram_console.h:21-22,
+ * board-notle.c:2398). That console is a single persistent_ram zone with
+ * Reed-Solomon ECC, 128-byte blocks, 16 parity bytes
+ * (drivers/staging/android/persistent_ram.c:185-188, ram_console.c:58), and
+ * after a warm reset 3.4 shows what it finds there as /proc/last_kmsg.
+ * Mainline's pstore/ram writes the same header, signature and ECC layout
+ * (fs/pstore/ram_core.c:32-39, persistent_ram_init_ecc) and puts the
+ * console zone first when there are no dmesg records (fs/pstore/ram.c,
+ * ramoops_probe). So with one console zone over the whole region and
+ * ecc-size 16, the stock kernel should show this kernel's console log as
+ * /proc/last_kmsg. That is unverified until Phase 1
+ * (docs/reset-analysis.md, test T1).
+ */
+#include "omap4-glass-xec-safe.dts"
+
+/ {
+	model = "Google Glass Explorer Edition (XE-C), safe debug image";
+
+	reserved-memory {
+		ramoops@a0000000 {
+			record-size = <0>;
+			console-size = <0x200000>;
+			pmsg-size = <0>;
+			ecc-size = <16>;
+		};
+	};
+};
