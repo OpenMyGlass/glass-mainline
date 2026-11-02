@@ -30,7 +30,8 @@ out=$top/out
 bi=$top/tools/bootimg/bootimg
 mkdir -p "$out"
 LIMIT=8388608
-[ -x "$bi" ] || tcc -O2 -o "$bi" "$top/tools/bootimg/bootimg.c"
+# tcc if present (the no-Python default), else any cc: bootimg.c is plain C.
+[ -x "$bi" ] || "$(command -v tcc || command -v cc || command -v gcc)" -O2 -o "$bi" "$top/tools/bootimg/bootimg.c"
 
 # The stock layout (deviceinfo and Google's images agree).
 hdr=(--base 0x80000000 --kernel-offset 0x00008000 --ramdisk-offset 0x01000000
