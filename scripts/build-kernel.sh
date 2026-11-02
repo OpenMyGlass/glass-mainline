@@ -45,6 +45,32 @@ sandbox=${GLASS_SANDBOX:-bwrap}
 [ "$os" = Darwin ] && sandbox=none
 case "$sandbox" in bwrap | none) ;; *) die "GLASS_SANDBOX is bwrap or none" ;; esac
 
+# Copy the Glass out-of-mainline driver sources (kernel/) into the kernel tree
+# and register them in the relevant Kconfig/Makefile. Idempotent: each append
+# is guarded, and the copy overwrites so edits in kernel/ always win.
+inject_glass_drivers() {
+    local kd=$top/kernel
+
+    # The notle drm_panel + its iCE40 loader (one composite module).
+    cp "$kd/drivers/gpu/drm/panel/panel-notle.c" \
+       "$kd/drivers/gpu/drm/panel/panel-notle-ice40.c" \
+       "$kd/drivers/gpu/drm/panel/panel-notle-ice40.h" \
+       "$src/drivers/gpu/drm/panel/"
+    grep -q DRM_PANEL_NOTLE "$src/drivers/gpu/drm/panel/Kconfig" ||
+        cat "$kd/drivers/gpu/drm/panel/Kconfig.notle" >> "$src/drivers/gpu/drm/panel/Kconfig"
+    grep -q panel-notle "$src/drivers/gpu/drm/panel/Makefile" || {
+        echo 'obj-$(CONFIG_DRM_PANEL_NOTLE) += panel-notle-dpi.o'   >> "$src/drivers/gpu/drm/panel/Makefile"
+        echo 'panel-notle-dpi-y := panel-notle.o panel-notle-ice40.o' >> "$src/drivers/gpu/drm/panel/Makefile"
+    }
+
+    # The glasshub MCU handshake.
+    cp "$kd/drivers/input/misc/glasshub-notle.c" "$src/drivers/input/misc/"
+    grep -q INPUT_GLASSHUB_NOTLE "$src/drivers/input/misc/Kconfig" ||
+        cat "$kd/drivers/input/misc/Kconfig.notle" >> "$src/drivers/input/misc/Kconfig"
+    grep -q glasshub-notle "$src/drivers/input/misc/Makefile" ||
+        echo 'obj-$(CONFIG_INPUT_GLASSHUB_NOTLE) += glasshub-notle.o' >> "$src/drivers/input/misc/Makefile"
+}
+
 # The build itself, run directly or inside the sandbox (this same script,
 # called again with GLASS_IN_SANDBOX=1).
 build() {
@@ -77,6 +103,12 @@ FRAG
     fi
     # The Glass device trees, built by kbuild from the kernel's own tree.
     cp "$top"/dts/*.dts "$top"/dts/*.dtsi "$src/arch/arm/boot/dts/ti/omap/"
+
+    # Glass out-of-mainline drivers: the display DRM port (the notle drm_panel
+    # and its self-contained iCE40 bitstream loader) and the glasshub MCU
+    # handshake. kernel/ mirrors the in-tree layout; copy the sources in and
+    # register them in Kconfig/Makefile. Idempotent (the build dir is reused).
+    inject_glass_drivers
 
     [ -f "$out/.config" ] || "${M[@]}" omap2plus_defconfig
     bash "$src/scripts/kconfig/merge_config.sh" -m -O "$out" "$out/.config" "${frags[@]}" ${frag2[@]+"${frag2[@]}"} > /dev/null

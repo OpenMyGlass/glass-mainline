@@ -152,6 +152,111 @@ config; (1b) FPGA loader as a standalone SPI driver tested against CDONE; (1c)
 glasshub input/backlight; (1d) the glue panel driver that sequences them and
 enforces LED limits.
 
+### What the DRM-port pass built (no device)
+
+This pass made the first compiling cut of the port. It does **not** light the
+display — it cannot, without the device — but it turns the multi-week blocker
+into concrete, reviewable, build-tested code with the hard sequencing already
+written. Everything below is in the default kernel build (CI builds the
+`full` DTB) and compiles clean with clang/lld; none of it has run on hardware.
+
+New source, out of mainline, copied into the kernel tree by
+`scripts/build-kernel.sh` (`inject_glass_drivers`, mirroring the DT copy) and
+registered in Kconfig/Makefile:
+
+- `kernel/drivers/gpu/drm/panel/panel-notle-ice40.{c,h}` — the **iCE40
+  slave-serial loader**, the most self-contained piece (split 1b). A plain
+  helper (no DT binding, no `module_init`) operating on a `struct ice40`
+  {spi, creset_b, cdone, fw_name, board_rev}. `ice40_program()` does
+  `request_firmware("dss_fpga.img")`, verifies the Google "fpga" container
+  (magic, entry walk, the bracketed-`~` CRC32), picks the entry whose
+  `supported_board_revs[]` lists our board, then clocks it in: flip CS to
+  active-high, pulse CRESET_B, confirm CDONE dropped, send the 1-byte
+  preamble, the body in 32 KiB DMA-safe chunks, 13 trailing clocks, wait for
+  CDONE (100 ms budget), read back the revision (0xff = fail), write the
+  pipeline/backlight-off defaults. `ice40_{read,write}_register()` are the
+  post-config 8-bit SPI control path (read = `reg & 0x7f`, write =
+  `reg | 0x80`). Ported line-for-line from 3.4 `ice40_load()` /
+  `fpga_reconfigure_inner()`.
+- `kernel/drivers/gpu/drm/panel/panel-notle.c` — the **drm_panel** (split 1d),
+  an SPI client on McSPI1 CS0. omapdrm's DPI output finds it through the OF
+  graph (`of_drm_find_panel` → `drm_panel_bridge`), the modern replacement for
+  the DSS2 omapfb attach. `get_modes()` emits the exact 3.4 timings
+  (640x360, 85.333 MHz, htotal 728 / vtotal 380) and the DPI bus format.
+  `prepare()` reuses the bootloader's FPGA config if the revision reads valid,
+  else runs `ice40_program()`. `enable()` sets DISP_ENB and **enforces the LED
+  power limits before lighting the LEDs** (`notle_led_apply()`, ported from
+  3.4 `led_config_to_linecuts`): the 76 mW budget, the 63/96/96 mW per-channel
+  ceilings and the 2444/4444/3111 mix are compiled-in defaults, DT can only
+  *tighten* them (the probe clamps), and a zero-percent channel is forced off.
+  Built as the composite module `panel-notle-dpi`.
+- `kernel/drivers/input/misc/glasshub-notle.c` — the **glasshub handshake**
+  (split 1c). I2C4 0x35: check part id (0xbb), read the app version, boot the
+  MCU application (`CMD_BOOT`, retried), expose don/doff + wink as input
+  events when an IRQ is wired. The **reflash path is absent by construction**
+  (no `CMD_FLASH`, no SREC parser, no memory writes) — the one unrecoverable
+  operation is simply not in the driver.
+
+DT (`dts/omap4-glass-xec.dts`, the `full` image only): `&mcspi1` enabled with
+the `google,notle-panel` child (48 MHz, mode 3, CRESET_B gpio3.23 / CDONE
+gpio3.21, the LED-limit properties, an OF-graph `port` to the DPI output);
+`&dss` re-enabled with `port { dpi_out → notle_panel_in }` and the DSS target
+module turned back on; the interim `simple-framebuffer` disabled so it does not
+fight omapdrm. The `safe` image is untouched: it keeps the DSS disabled and the
+simple-framebuffer colour-bar path as the interim fallback.
+
+### What is **not** done, and needs the device
+
+- **LCoS per-pixel init over I2C4 0x49.** 3.4 writes `panel_init_regs` and the
+  gamma table to a *separate* I2C panel subdevice (`panel-notle-panel`, 0x49),
+  not to the FPGA. That subdevice is not wired here; without it the FPGA scans
+  the DPI stream but the LCoS keeps its bootloader register state. This is the
+  largest functional gap in the panel path.
+- **The PWM backlight model** (3.4 `led_config_pwm`, FPGA rev > 0x3e). The
+  linecut model is ported and caps power correctly on any revision, but newer
+  FPGAs want the PWM illumination schedule; the driver warns once and falls
+  back. Which model the unit's FPGA uses is read from the revision register at
+  load time.
+- **DPI bus polarity and sync** (`DE`, pixel-clock edge, H/V sync) are
+  best-guess defaults — confirm against the bootloader's working DISPC setup.
+- **McSPI1 native chip-select polarity.** The slave-serial load flips
+  `SPI_CS_HIGH` at runtime (as 3.4 did); if omap2-mcspi does not honour that on
+  native CS, the fallback is a dedicated `cs-gpio` on CS0.
+- **glasshub IRQ.** BLINK_INT is `gpio_wk1`, in the USIM wake-pad bank that is
+  not powered yet (safe-dt-review.md D5), so the DT describes no interrupt and
+  the driver runs handshake-only until that bank is brought up.
+
+### On-device bring-up order (display)
+
+Only after the boot-survival gate (§0) is passed, on battery, never on the
+head, short sessions (no thermal gate yet, D4):
+
+1. **FPGA loader alone.** Confirm `ice40_program()` drives CDONE: watch for
+   `iCE40 configured, revision 0x%02x` and a sane revision. If CDONE never
+   drops after the CRESET_B pulse, try the `cs-gpio` fallback. The bitstream
+   `dss_fpga.img` must be in the initramfs `/lib/firmware` (it is referenced by
+   `request_firmware` name only; the blob is never committed).
+2. **omapdrm DPI + static panel.** With the `full` DT, confirm omapdrm binds
+   (`ti,omap4-dss`), the DPI output finds the panel, and a modeset at the 3.4
+   timings does not wedge DISPC. Expect to iterate on bus polarity here.
+3. **LCoS I2C init.** Wire the 0x49 subdevice and the `panel_init_regs`/gamma
+   writes; this is where a correct image first appears.
+4. **LED limits + backlight.** Verify `notle_led_apply()` with brightness 0,
+   then low, checking the per-channel caps hold. **Measure, do not trust.**
+5. **glasshub** handshake, then its IRQ once the wake-pad bank is powered.
+
+### Honest status and revised estimate (display)
+
+Roughly **the first 25-35 %** of the display port is done: the FPGA loader
+(near-complete, the self-contained piece), the DRM scaffolding and panel
+sequencing, the safety-critical LED-limit math, the DT, and a clean build.
+The **remaining 65-75 %** is genuinely on-device: the LCoS I2C init (no pixels
+without it), bus-polarity/timing iteration, the PWM backlight model, and the
+whole verify-measure-iterate loop that needs eyes on the prism. Unchanged
+estimate: **several weeks on hardware** once boot survives; what this pass buys
+is that the hard, no-device-needed sequencing is already written and reviewed,
+so that time is spent on the device, not at the keyboard.
+
 ## 2. Touchpad and IMU — what `glassd` needs
 
 Both are already described in the **`full`** DT (`dts/omap4-glass-xec.dts`) and

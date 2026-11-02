@@ -4,10 +4,15 @@
  * Bluetooth (BCM4330), the battery gauge, the touchpad, the IMU and the
  * camera button. Sources as in omap4-glass-xec-common.dtsi ("notle:").
  *
- * Not described yet: the display (panel-notle-panel @ I2C4 0x49 behind the
- * iCE40 FPGA, no mainline driver), the glasshub MCU (I2C4 0x35), the
- * LTR-506 light sensor (I2C4 0x3a, no mainline driver), audio (TWL6040 and
- * the ABE), the camera and GPS.
+ * Display (parity, device-gated): the iCE40 FPGA / notle panel on McSPI1 and
+ * the glasshub MCU (I2C4 0x35) are now described and driven by the
+ * out-of-mainline drivers in kernel/ (panel-notle-dpi, glasshub-notle). The
+ * DSS is re-enabled for omapdrm and the interim simple-framebuffer disabled;
+ * all of this is UNVERIFIED on hardware (see the Display section below).
+ *
+ * Still not described: the LCoS per-pixel init over the separate I2C4 0x49
+ * panel subdevice (panel-notle-panel), the LTR-506 light sensor (I2C4 0x3a,
+ * no mainline driver), audio (TWL6040 and the ABE), the camera and GPS.
  */
 #include "omap4-glass-xec-common.dtsi"
 #include <dt-bindings/input/input.h>
@@ -245,5 +250,114 @@
 		mount-matrix = "0", "1", "0",
 			       "0", "0", "1",
 			       "1", "0", "0";
+	};
+
+	/*
+	 * notle: glasshub MCU (board-notle.c:1733-1765), the on-head/wink/
+	 * backlight controller. The 3.4 IRQ is BLINK_INT on gpio_wk1 (sim_clk),
+	 * in the USIM wakeup-pad bank that is not powered yet (safe-dt-review.md
+	 * D5), so no interrupt is described: the driver runs the handshake
+	 * (part id, version, boot) and does not report don/doff or wink until
+	 * the wake pad is wired. Its firmware-reflash path is never used.
+	 */
+	glasshub@35 {
+		compatible = "google,glasshub";
+		reg = <0x35>;
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Display (parity target): the 640x360 LCoS panel driven as 24-bit DPI from
+ * DISPC LCD2, behind the Lattice iCE40 FPGA on McSPI1. This is the real
+ * omapdrm path, the successor to the safe image's interim simple-framebuffer.
+ * It is UNVERIFIED on hardware: enabling the DSS lets ti-sysc reset the
+ * display module (which the safe image deliberately avoids to keep the
+ * bootloader's picture), the DPI bus polarity and the LCoS I2C init are not
+ * confirmed, and the iCE40 slave-serial load is untested. See
+ * docs/mainline-bringup.md for the on-device bring-up order.
+ * ---------------------------------------------------------------------------
+ */
+
+&omap4_pmx_core {
+	/* notle: ice40_spi_board_info, McSPI1 CS0 (board-notle.c:607-677). */
+	mcspi1_pins: mcspi1-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x132, PIN_INPUT | MUX_MODE0)	/* mcspi1_clk */
+			OMAP4_IOPAD(0x134, PIN_INPUT | MUX_MODE0)	/* mcspi1_somi */
+			OMAP4_IOPAD(0x136, PIN_OUTPUT | MUX_MODE0)	/* mcspi1_simo */
+			OMAP4_IOPAD(0x138, PIN_OUTPUT | MUX_MODE0)	/* mcspi1_cs0 */
+		>;
+	};
+
+	/* notle: FPGA_CDONE (GPIO 85) in, FPGA_CRESET_B (GPIO 87) out high. */
+	fpga_pins: fpga-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x0c4, PIN_INPUT | MUX_MODE3)	/* usbb1_ulpitll_stp.gpio_85: FPGA_CDONE */
+			OMAP4_IOPAD(0x0c8, PIN_OUTPUT | MUX_MODE3)	/* usbb1_ulpitll_nxt.gpio_87: FPGA_CRESET_B */
+		>;
+	};
+};
+
+&mcspi1 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&mcspi1_pins>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * The iCE40 FPGA / notle panel. SPI mode 3, up to 48 MHz (3.4
+	 * ice40_spi_board_info). The driver (panel-notle-dpi, out of mainline
+	 * in kernel/) loads dss_fpga.img over slave-serial using the CRESET_B/
+	 * CDONE GPIOs, then registers a drm_panel on this port. LED power caps
+	 * from board-notle.c:569-588; DT may only tighten them.
+	 */
+	panel@0 {
+		compatible = "google,notle-panel";
+		reg = <0>;
+		spi-max-frequency = <48000000>;
+		spi-cpol;
+		spi-cpha;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fpga_pins>;
+		creset-gpios = <&gpio3 23 GPIO_ACTIVE_HIGH>;	/* GPIO 87 */
+		cdone-gpios = <&gpio3 21 GPIO_ACTIVE_HIGH>;	/* GPIO 85 */
+		google,notle-version = <4>;			/* confirm on device */
+		google,led-limit-milliwatt = <76>;
+		google,led-max-milliwatt = <63 96 96>;
+		google,led-mix-permyriad = <2444 4444 3111>;
+		google,default-brightness = <64>;
+
+		port {
+			notle_panel_in: endpoint {
+				remote-endpoint = <&dpi_out>;
+			};
+		};
+	};
+};
+
+/*
+ * Bring the DSS back under mainline's control for omapdrm (common.dtsi
+ * disables it so the bootloader's picture survives). The interim
+ * simple-framebuffer is turned off here so it does not fight omapdrm for the
+ * DISPC. The safe image keeps both as they are.
+ */
+&{/ocp/target-module@58000000} {
+	status = "okay";
+};
+
+&{/chosen/framebuffer@9c700000} {
+	status = "disabled";
+};
+
+&dss {
+	status = "okay";
+
+	port {
+		dpi_out: endpoint {
+			remote-endpoint = <&notle_panel_in>;
+			data-lines = <24>;
+		};
 	};
 };
