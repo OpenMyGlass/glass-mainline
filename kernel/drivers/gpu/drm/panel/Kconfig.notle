@@ -1,0 +1,12 @@
+
+config DRM_PANEL_NOTLE
+	tristate "Google Glass XE-C notle LCoS/iCE40 panel"
+	depends on DRM && OF && SPI
+	select DRM_PANEL
+	help
+	  DRM panel driver for the Google Glass XE-C ("notle") 640x360 LCoS
+	  near-eye display, driven as 24-bit DPI from the OMAP4 DISPC behind a
+	  Lattice iCE40 FPGA on McSPI1. It loads the FPGA bitstream
+	  (dss_fpga.img, via request_firmware) and enforces the panel LED power
+	  limits before the display is lit. Added out of mainline by
+	  OpenMyGlass (glass-mainline); see docs/mainline-bringup.md.

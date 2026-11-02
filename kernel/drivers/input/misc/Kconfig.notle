@@ -1,0 +1,11 @@
+
+config INPUT_GLASSHUB_NOTLE
+	tristate "Google Glass XE-C glasshub MCU"
+	depends on I2C && OF
+	help
+	  Runtime handshake driver for the Google Glass XE-C ("notle") glasshub
+	  MCU on I2C4 0x35: it checks the part id, reads the firmware version,
+	  boots the MCU application and reports on-head (don/doff) and wink as
+	  input events. The firmware-reflash path is deliberately not
+	  implemented (it is unrecoverable). Added out of mainline by
+	  OpenMyGlass (glass-mainline); see docs/mainline-bringup.md.
