@@ -98,6 +98,104 @@ What that means and what it does not:
 
 **Tests (future, inactive):** charge fully on the stock system first, and note the bq27520 voltage in Phase 1. With the debug image, T1's log shows `critical temperature reached` if the thermal core shut down. T2 bit 0 (cold reset) points to a power cycle. Watch whether the device restarts unplugged: unplug the cable during the test, so that a power-off stays off. A watchdog reset reboots anyway.
 
+## What the boot-survival pass changed (the smoke2 candidate)
+
+This pass (OpenMyGlass) does not have the hardware either, so it makes only the
+changes that are safe to make from source, attacks the one hypothesis that is
+actionable without the device, and makes the next boot as informative as
+possible. The result is `out/mainline-smoke2-boot.img` (`scripts/build-smoke2.sh`).
+
+**H3 (regulators), the one host-side fix applied.** The four rails 3.4 keeps
+always on — VAUX2, VAUX3, VUSIM, VANA — are now `regulator-always-on` in
+`dts/omap4-glass-xec-common.dtsi`, with their 3.4 `board-notle.c` citations
+(D2 of [safe-dt-review.md](safe-dt-review.md)). Mainline's "disable unused
+regulators" pass runs ~30-35 s into boot, inside the reset window, and it is
+the single best timing match among H1-H5 that we can do anything about from a
+host. The boot command line already carries `regulator_ignore_unused` (and the
+debug kernel forces it with `CMDLINE_EXTEND`), but D8 records that the
+bootloader's command-line handling and length limit are unverified; the
+always-on property removes the vector no matter what the command line does, and
+adds no voltage 3.4 does not already set (rule 4). This also covers the full
+DT, so the Model-A-equivalent image inherits it.
+
+**H1 (watchdog), why nothing was changed and why it is now cheap to rule out.**
+Mainline already disables the OMAP WDT2: `omap_wdt` writes the disable sequence
+at probe (`early_enable=0`, the default), and `ti-sysc` disables it even
+earlier through the WDT reset quirk. Both run at roughly `device_initcall`, well
+before userspace. So the moment the first `OMGB-MAINLINE: alive beat=1` line
+appears, WDT2 is exonerated — if the device still resets after that, WDT2 is not
+the cause, and the suspect becomes the **secure** watchdog (which Linux cannot
+stop without the PPA), H2 (a panic), or H5. There is therefore no host-side WDT2
+fix to make; `CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED` is already `default y`, so if
+the quirk ever left WDT2 running the core would pet it anyway.
+
+**The TWL6030 PMIC watchdog, considered and rejected for now.** Mainline's
+`twl4030_wdt` (compatible `ti,twl4030-wdt`) stops its watchdog at probe, which
+would be exactly the "disable it" fix — but on a twl6030 that driver writes
+`TWL_MODULE_PM_RECEIVER + 0x3`, which maps to `PM_SLAVE_MISC` base `0x30`
+(`drivers/mfd/twl-core.c`), i.e. register `0x33` on subchip 0, **not** a
+verified twl6030 watchdog register. Upstream's `twl6030.dtsi` deliberately omits
+the node that `twl4030.dtsi` has. Writing an unsourced PMIC register (rule 4,
+rule 9) is not worth it blind. The right move is on-device first: read the PMIC
+WATCHDOG_CFG over I2C1 before deciding (see T6 below).
+
+**Denser heartbeats.** `smoke-init` now logs `OMGB-MAINLINE: alive beat=N` once
+a **second** for the first 120 s (then every 5 s), so the last beat in
+`/proc/last_kmsg` dates the reset to the second across the whole ~1-minute
+window. `CONFIG_PRINTK_TIME` stamps every line with the kernel clock as well, so
+the two agree independently (test T3).
+
+**Interim display (so a surviving boot is not blind).** If the kernel reaches
+and passes the handoff, `smoke-init` re-points the running DISPC at the device
+tree's simple-framebuffer (0x9c700000) over `/dev/mem` and paints an eight-bar
+colour test pattern on the prism, using the hardware-proven DISPC addresses from
+the Model-A userland. See [mainline-bringup.md](mainline-bringup.md). This is
+diagnostic, not a parity feature.
+
+### How to read the result after an owner-assisted power-cycle
+
+One `fastboot boot out/mainline-smoke2-boot.img` (RAM only, writes nothing).
+The owner must be present: mainline does not auto-recover, so a long press of
+power returns to the stock system, from which the log is read.
+
+1. **Did the prism light up with colour bars?** If yes, the boot survived at
+   least to the display handoff (a few seconds in) *and* the DISPC was still
+   clocked — strong, immediate, serial-free evidence. If the bars appear and
+   then vanish, note roughly when (that times the reset too).
+2. **After the reset, on the stock system, read `/proc/last_kmsg`** (test T1).
+   Grep `OMGB-MAINLINE:`. The decisive number is the **last `alive beat=N`**:
+   - **no `OMGB-MAINLINE:` line at all** → the kernel never reached userspace;
+     this is H1 (an early stall before `rdinit`), and WDT2/secure-watchdog or an
+     early driver is the suspect. Next lever: boot with `maxcpus=1` appended, to
+     take the HS-part PPA call during CPU1 bring-up out of the path.
+   - **`beat=N` with N well past the reset window and then the log ends mid-boot
+     of the stock system** → the kernel survived at least N seconds. Since the
+     reset was observed at "about a minute", **a last beat of `beat≈60` or more
+     with no `Kernel panic` line means the always-on regulators (H3) plausibly
+     moved the needle** — compare against a run without them if in doubt.
+   - **`Kernel panic` in the tail** → H2; the panic reason is the cause, and
+     `panic=10` did the reboot.
+   - **`critical temperature reached`** → H5 (thermal).
+3. **PRM_RSTST** (test T2, `0x4A307B04`): bit 3 = WDT2 (should now be ruled out
+   by step 2), bit 4 = secure watchdog, bit 1 = software/panic reboot, bit 0 =
+   cold reset/power cycle.
+
+**Honest status.** Boot survival is **not yet demonstrated** — it cannot be,
+without the device. What this pass does is remove the one reset vector reachable
+from a host (H3), and turn the next single boot into a precise measurement: the
+last `alive beat=N` and PRM_RSTST together will say in one session whether the
+kernel now survives, and if not, which of the remaining hypotheses
+(secure watchdog, panic, thermal) is live. If `beat=N` stalls at a fixed time
+equal to the bootloader's watchdog timeout, the follow-up lever is
+`omap_wdt.early_enable=1` (keeps WDT2 pinged by the core instead of disabled) to
+confirm a watchdog, and T6 for the PMIC watchdog.
+
+- **T6, the PMIC watchdog (new, on-device, read-only).** With root on the stock
+  system, read TWL6030 WATCHDOG_CFG over I2C1 (0x48) to see whether the
+  bootloader armed the PMIC watchdog. If it is armed, the fix is a sourced
+  register write (or the `twl4030_wdt` node once its twl6030 register is
+  confirmed), not before.
+
 ## Order of the tests, when the hardware is here (inactive)
 
 1. Phase 1 backup (rule 3) and the read-only stock readings: `dmesg` (SMC carve-out, board revision), `regulator_summary`, `clk_summary`, `/proc/iomem`, pad mux, the controls for T1 and T2.

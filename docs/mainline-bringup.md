@@ -27,13 +27,23 @@ understood and fixed, because without the display we are blind and depend on
 `/proc/last_kmsg` and serial. The sequence is therefore:
 
 0. **Boot survival (prerequisite, not a parity feature).** Run
-   `out/mainline-smoke-boot.img` (built by `scripts/build-smoke.sh`): a static
-   ARM init logging `OMGB-MAINLINE:` heartbeats to `/dev/kmsg`. Its heartbeat
-   counter dates the reset from `/proc/last_kmsg`. Then work the H1-H5 ladder in
-   [reset-analysis.md](reset-analysis.md). Expected effort: **1-3 device
-   sessions** once hardware is at hand; the hypotheses and tests are already
-   written. **Until the kernel survives several minutes, do not start the driver
-   work below.**
+   `out/mainline-smoke2-boot.img` (built by `scripts/build-smoke2.sh`): a static
+   ARM init logging `OMGB-MAINLINE:` heartbeats to `/dev/kmsg`, now **once a
+   second for the first 120 s** so the last beat in `/proc/last_kmsg` dates the
+   reset to the second. The candidate carries the one host-side reset fix — the
+   four 3.4 always-on rails (VAUX2/VAUX3/VUSIM/VANA) described `always-on`, so
+   mainline's ~30 s "disable unused regulators" pass cannot drop them
+   (hypothesis **H3**); OMAP WDT2 (**H1**) is already disabled by `omap_wdt` at
+   probe, so it is ruled out the moment the first heartbeat appears. It also
+   paints an interim display test pattern (see §1 below). Read the result with
+   the step-by-step in [reset-analysis.md](reset-analysis.md) ("How to read the
+   result after an owner-assisted power-cycle"): **a last `alive beat=N` of ~60
+   or more with no `Kernel panic` line means the boot now plausibly survives the
+   reset window.** Then work the rest of the H1-H5 ladder. Expected effort:
+   **1-3 device sessions** once hardware is at hand. **Until the kernel survives
+   several minutes, do not start the driver work below.** (The first candidate,
+   `scripts/build-smoke.sh` / `mainline-smoke-boot.img`, is the earlier baseline;
+   smoke2 supersedes it.)
 
 Then bring peripherals up in the order of the sections that follow. The order is
 chosen so that each step is verifiable with what the previous steps provide, and
@@ -108,12 +118,30 @@ before a single correct pixel appears:
 
 **Interim stepping stone (low risk, gets pixels early).** The `safe` DT already
 keeps the bootloader's running DISPC alive and exposes a `simple-framebuffer` at
-0x9c700000, and the smoke/`rcS` init re-points DISPC `GFX_BA0/BA1` there over
-`/dev/mem` (`userland/initramfs/init` `display_handoff`). This yields a **static
-framebuffer that reuses the FPGA the bootloader already programmed** — no mode
-set, no pipeline, but real pixels — and is the right first target: it confirms
-the display is reachable before the DRM driver exists. The full DRM path (1-3
-above) is what enables mode control, the camera preview and GPU compositing.
+0x9c700000, and the init re-points DISPC `GFX_BA0/BA1` there over `/dev/mem`.
+Two inits now do this: the busybox `userland/initramfs/init` `display_handoff`
+(full/rootfs path), and — new in the boot-survival pass — the freestanding
+`tools/smoke-init` in the **smoke2** candidate, which does the same handoff with
+the same hardware-proven addresses (CM_DSS_DSS_CLKCTRL 0x4a009120, DISPC GFX_BA0
+0x48041080 / BA1 0x48041084, GFX_ATTRIBUTES 0x480410a0, DISPC_CONTROL2 0x48041238
+GOLCD2) and then **paints an eight-bar colour test pattern** into the
+framebuffer. The mechanism:
+
+1. the bootloader programmed the iCE40 and left the DISPC scanning 0x80500000
+   (now occupied by the decompressed kernel — so the prism shows garbage until
+   handoff);
+2. the init checks CM_DSS IDLEST (reading a gated DISPC faults), re-points
+   GFX_BA0/BA1 at the reserved 0x9c700000, forces the format to xRGB, latches
+   GOLCD2, and writes pixels there;
+3. result: **a static framebuffer that reuses the FPGA the bootloader already
+   programmed** — no mode set, no pipeline, but real pixels. In smoke2 the
+   colour bars double as the first serial-free "the boot survived to here and
+   the display is reachable" signal (`CONFIG_DEVMEM=y`,
+   `STRICT_DEVMEM` off, pinned in `config/glass.config`).
+
+This confirms the display is reachable before the DRM driver exists. The full
+DRM path (1-3 above) is what enables mode control, the camera preview and GPU
+compositing.
 
 **Risk: high. Effort: multi-week** and the single biggest item in the project.
 Porting `panel-notle-dpi.c` (≈2400 lines of omapfb/DSS2-era code) to a clean

@@ -228,6 +228,43 @@
 	regulator-always-on;
 };
 
+/*
+ * Four rails that 3.4 keeps always on but mainline's twl6030.dtsi leaves
+ * free to be switched off (docs/safe-dt-review.md D2). Mainline turns off
+ * every enabled, non-always-on, unclaimed regulator about 30 s after late
+ * init -- which is squarely inside the "about a minute" reset window
+ * (docs/reset-analysis.md, hypothesis H3). The boot command line carries
+ * regulator_ignore_unused (and the debug kernel forces it with
+ * CMDLINE_EXTEND), but D8 notes the bootloader's handling of the ATAG command
+ * line, and its length limit, are unverified; if the flag is dropped these
+ * four rails go off. Describing them as always-on, exactly as 3.4 does,
+ * removes that reset vector whatever the command line does. This adds no new
+ * voltage and no value 3.4 does not already set (rule 4). It only keeps on
+ * what the stock system keeps on; to undo, remove the property. VAUX3 in
+ * particular feeds a consumer 3.4 never names, so it is the riskiest to lose.
+ *   VAUX2  2.8 V, always on (sensors, camera, ABE)  board-notle.c:841-859
+ *   VAUX3  1.2 V, always on (unnamed consumer)       board-notle.c:861-876
+ *   VUSIM  3.0 V, always on (touchpad)               board-notle.c:935-951
+ *   VANA   2.1 V, always on                          board-notle.c:953-971
+ * (VUSIM's registration-time 3.0->2.9 V move, D3, is a separate, flagged
+ * issue that always-on does not change; it is not a reset cause.)
+ */
+&vaux2 {
+	regulator-always-on;
+};
+
+&vaux3 {
+	regulator-always-on;
+};
+
+&vusim {
+	regulator-always-on;
+};
+
+&vana {
+	regulator-always-on;
+};
+
 /* notle: musb_board_data, UTMI, peripheral (no CONFIG_USB_OTG). */
 &usb_otg_hs {
 	pinctrl-names = "default";
