@@ -100,3 +100,28 @@ jobs:
           name: glass-smoke-boot-${{ env.KV }}
           path: out/mainline-smoke-boot.img
           retention-days: 14
+
+      # The smoke2 candidate (OpenMyGlass boot-survival pass): the same build
+      # with the always-on regulators (H3), dense heartbeats and the interim
+      # display test pattern. Packed into its own fastboot-boot image.
+      - name: Build the smoke2-boot candidate
+        run: JOBS=$(nproc) scripts/build-smoke2.sh
+
+      - name: Check the smoke2 image fits the 8 MiB bound
+        run: |
+          sz=$(stat -c %s out/mainline-smoke2-boot.img)
+          echo "mainline-smoke2-boot.img: $sz bytes"
+          [ "$sz" -le 8388608 ] || { echo "over the 8 MiB bound"; exit 1; }
+          # The always-on rails must be in the safe-debug DTB the image carries.
+          dtc -q -I dtb -O dts \
+            build/kernel-$KV-debug/arch/arm/boot/dts/ti/omap/omap4-glass-xec-safe-debug.dtb > sd.dts
+          for r in vaux2 vaux3 vusim vana; do
+            awk "/regulator-$r \{/,/\};/" sd.dts | grep -q 'always-on' || { echo "$r not always-on"; exit 1; }
+          done
+          echo "smoke2: four rails always-on, image under bound"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: glass-smoke2-boot-${{ env.KV }}
+          path: out/mainline-smoke2-boot.img
+          retention-days: 14
